@@ -1,0 +1,132 @@
+import cv2
+import pandas as pd
+import tkinter as tk
+from tkinter import filedialog
+from ultralytics import YOLO
+from collections import deque
+import threading
+
+# Load YOLOv5s model
+model = YOLO('yolov5s.pt')
+
+# Tracker class to assign unique IDs to detected objects
+class Tracker:
+    def __init__(self):
+        self.id_count = 0
+        self.tracks = {}
+
+    def update(self, detections):
+        updated_tracks = []
+        for det in detections:
+            matched = False
+            for track_id, track in self.tracks.items():
+                if self._iou(det, track) > 0.3:  # If IOU is high enough, match detection to existing track
+                    updated_tracks.append([*det, track_id])
+                    self.tracks[track_id] = det
+                    matched = True
+                    break
+            if not matched:
+                self.id_count += 1
+                self.tracks[self.id_count] = det
+                updated_tracks.append([*det, self.id_count])
+        # Remove lost tracks
+        self.tracks = {track_id: track for track_id, track in self.tracks.items() if track_id in [t[-1] for t in updated_tracks]}
+        return updated_tracks
+
+    # Intersection over Union (IoU) calculation
+    def _iou(self, box1, box2):
+        x1, y1, x2, y2 = box1
+        x3, y3, x4, y4 = box2
+        inter_x1 = max(x1, x3)
+        inter_y1 = max(y1, y3)
+        inter_x2 = min(x2, x4)
+        inter_y2 = min(y2, y4)
+        inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
+        box1_area = (x2 - x1) * (y2 - y1)
+        box2_area = (x4 - x3) * (y4 - y3)
+        return inter_area / (box1_area + box2_area - inter_area + 1e-5)
+
+# Load class names from COCO dataset
+with open("coco.txt", "r") as file:
+    class_list = file.read().strip().split("\n")
+
+# Main tracking and counting function
+def run_tracking(source):
+    tracker = Tracker()
+    counter = deque(maxlen=1000)
+    line_position = 383
+    offset = 4
+
+    cap = cv2.VideoCapture(source)
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame = cv2.resize(frame, (1020, 500))
+        results = model.predict(frame, verbose=False)
+
+        detections = []
+        for box in results[0].boxes:
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            conf = box.conf[0].cpu().numpy()
+            cls = box.cls[0].cpu().numpy()
+            if class_list[int(cls)] == "person":
+                detections.append([int(x1), int(y1), int(x2), int(y2)])
+
+        tracked_objects = tracker.update(detections)
+
+        for obj in tracked_objects:
+            x1, y1, x2, y2, obj_id = obj
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            # Draw bounding box and object ID
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+            cv2.putText(frame, f"ID {obj_id}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+            # Check if object crosses the counting line
+            if line_position - offset < cy < line_position + offset and obj_id not in counter:
+                counter.append(obj_id)
+                cv2.circle(frame, (cx, cy), 4, (0, 0, 255), -1)
+
+        # Draw the counting line
+        cv2.line(frame, (0, line_position), (1020, line_position), (0, 255, 0), 2)
+
+        # Show number of unique people detected crossing the line
+        people_count = len(counter)
+        cv2.putText(frame, f"People Count: {people_count}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+
+        # Display warning if count exceeds threshold
+        if people_count > 60:
+            cv2.putText(frame, "warning!!", (300, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+
+        # Show the result frame
+        cv2.imshow("Frame", frame)
+        if cv2.waitKey(1) & 0xFF == 27:  # Exit if ESC is pressed
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+# Start tracking using webcam
+def start_with_camera():
+    threading.Thread(target=run_tracking, args=(0,)).start()
+
+# Start tracking using selected video file
+def start_with_video():
+    video_path = filedialog.askopenfilename(filetypes=[("Video files", "*.mp4 *.avi")])
+    if video_path:
+        threading.Thread(target=run_tracking, args=(video_path,)).start()
+
+# GUI window
+root = tk.Tk()
+root.title("Select Video Source")
+root.geometry("300x150")
+
+btn_cam = tk.Button(root, text="Use Webcam", command=start_with_camera, height=2, width=25)
+btn_cam.pack(pady=10)
+
+btn_video = tk.Button(root, text="Open Video File", command=start_with_video, height=2, width=25)
+btn_video.pack(pady=10)
+
+root.mainloop()
